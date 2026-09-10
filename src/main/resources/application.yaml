@@ -65,7 +65,7 @@ spring:
       max-request-size: 10MB
 
 jwt:
-  secret: "YWkta25vd2xlZGdlLWFzc2lzdGFudC1zZWNyZXQta2V5LTIwMjQtc2VjdXJl"
+  secret: ""
   expiration: 86400000
 
 resilience4j:

@@ -24,9 +24,10 @@ public class DocumentIndexingConsumer {
 
     @KafkaListener(topics = "document-indexing" , groupId = "indexing-group")
     public void onDocumentUpload(String message){
+        Long documentId = null;
         try{
             Map<String, Object> event = objectMapper.readValue(message, Map.class);
-            Long documentId = Long.valueOf(event.get("documentId").toString());
+            documentId = Long.valueOf(event.get("documentId").toString());
             String content = event.get("content").toString();
             String filename = event.get("filename").toString();
             // Events published before uploadedBy was added lack it — fall back to the DB row
@@ -34,7 +35,7 @@ public class DocumentIndexingConsumer {
                     ? event.get("uploadedBy").toString()
                     : documentRepository.findById(documentId)
                         .map(Document::getUploadedBy)
-                        .orElseThrow(() -> new IllegalStateException("No owner for document " + documentId));
+                        .orElseThrow(() -> new IllegalStateException("No owner found for document"));
 
             log.info("Received indexing event for document: {}", documentId);
 
@@ -57,8 +58,23 @@ public class DocumentIndexingConsumer {
             log.info("Document indexed successfully: {}", documentId);
 
         } catch (Exception e) {
-            log.error("Failed to process indexing event", e);
+            log.error("Failed to process indexing event for document {}", documentId, e);
+            if (documentId != null) {
+                markFailed(documentId);
+            }
         }
 
+    }
+
+    private void markFailed(Long documentId) {
+        try {
+            documentRepository.findById(documentId).ifPresent(doc -> {
+                doc.setStatus(Document.IndexingStatus.FAILED);
+                documentRepository.save(doc);
+            });
+        } catch (Exception e) {
+            // The DB itself may be why indexing failed — don't let this mask the original error
+            log.error("Could not mark document {} as FAILED", documentId, e);
+        }
     }
 }

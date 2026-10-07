@@ -4,9 +4,11 @@ import com.ai_knowledge_assistant.ai_knowledge_assistant.document.entity.Documen
 import com.ai_knowledge_assistant.ai_knowledge_assistant.document.model.DocumentResponse;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.document.repository.DocumentRepository;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.kafka.DocumentIndexingProducer;
+import com.ai_knowledge_assistant.ai_knowledge_assistant.rag.DocumentIndexingService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.Tika;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -20,6 +22,7 @@ public class DocumentService {
 
     private final DocumentIndexingProducer documentIndexingProducer;
     private final DocumentRepository documentRepository;
+    private final DocumentIndexingService documentIndexingService;
     private final Tika tika = new Tika();
 
     public DocumentResponse upload(MultipartFile file , String emailID){
@@ -58,6 +61,8 @@ public class DocumentService {
                 .map(DocumentResponse::from)
                 .toList();
     }
+    // Cache keys are "email:question" and can't be evicted per user, so clear all cached answers
+    @CacheEvict(value = "rag-queries", allEntries = true)
     public void deleteDocument(Long id, String userEmail) {
         Document doc = documentRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Document not found"));
@@ -66,6 +71,8 @@ public class DocumentService {
             throw new RuntimeException("Not authorized to delete this document");
         }
 
+        // Remove chunks first: if this fails the row survives and the delete can be retried
+        documentIndexingService.deleteDocument(id);
         documentRepository.delete(doc);
         log.info("Document deleted: {} by {}", id, userEmail);
     }

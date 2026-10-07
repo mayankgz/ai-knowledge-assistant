@@ -16,12 +16,13 @@ public class DocumentIndexingProducer {
     private final KafkaTemplate<String,Object> kafkaTemplate;
     private static final String TOPIC = "document-indexing";
 
-    public void sendDocumentEvent(Long documentId , String fileName , String content){
+    public void sendDocumentEvent(Long documentId , String fileName , String content , String uploadedBy){
 
         Map<String,Object> event = Map.of(
                 "documentId" ,documentId,
                 "filename",fileName,
-                "content",content
+                "content",content,
+                "uploadedBy",uploadedBy
 
         );
         kafkaTemplate.send(TOPIC,documentId.toString(),event);

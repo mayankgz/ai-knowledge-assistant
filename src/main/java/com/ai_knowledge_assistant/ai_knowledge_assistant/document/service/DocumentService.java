@@ -42,6 +42,7 @@ public class DocumentService {
                     document.getId()
                     ,file.getOriginalFilename()
                     ,content
+                    ,emailID
             );
             return  DocumentResponse.from(document);
         }catch (Exception e) {

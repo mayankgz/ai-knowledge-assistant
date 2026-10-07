@@ -24,7 +24,7 @@ spring:
       api-key: " "     # real value comes from application-local.yaml (gitignored)
       chat:
         options:
-          model: llama-3.3-70b-versatile
+          model: openai/gpt-oss-120b
           temperature: 0.7
           max-tokens: 1000
       embedding:

@@ -24,7 +24,9 @@ public class RagService {
     private final VectorStore vectorStore;
     private final ChatClient chatClient;
 
-    @Cacheable(value = "rag-queries", key = "#userEmail + ':' + #question.toLowerCase().trim()")
+    // Skip caching sourceless answers (no docs yet, or the fallback) so they don't stick for 30 min
+    @Cacheable(value = "rag-queries", key = "#userEmail + ':' + #question.toLowerCase().trim()",
+            unless = "#result.sources.isEmpty()")
     @CircuitBreaker(name = "groqApi" , fallbackMethod = "queryFallback")
     @Retry(name = "groqApi")
     public  RagResponse query(String question, String userEmail){
@@ -37,7 +39,7 @@ public class RagService {
                         .filterExpression(new FilterExpressionBuilder().eq("uploadedBy", userEmail).build())
                         .build()
         );
-        if (relevantDocs == null) {
+        if (relevantDocs == null || relevantDocs.isEmpty()) {
             return RagResponse.builder()
                     .answer("No relevant documents found. Please upload documents first.")
                     .sources(List.of())

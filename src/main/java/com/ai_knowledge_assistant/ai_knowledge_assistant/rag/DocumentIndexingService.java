@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -40,8 +41,8 @@ public class DocumentIndexingService {
     }
 
     public void deleteDocument(Long documentId) {
-        // Delete all chunks for this document from ChromaDB
-        vectorStore.delete(List.of(documentId.toString()));
+        // Chunk IDs are generated per chunk, so match on the documentId metadata instead
+        vectorStore.delete(new FilterExpressionBuilder().eq("documentId", documentId.toString()).build());
         log.info("Document {} removed from vector store", documentId);
     }
 }

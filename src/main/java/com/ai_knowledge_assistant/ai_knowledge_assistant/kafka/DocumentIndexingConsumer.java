@@ -29,6 +29,12 @@ public class DocumentIndexingConsumer {
             Long documentId = Long.valueOf(event.get("documentId").toString());
             String content = event.get("content").toString();
             String filename = event.get("filename").toString();
+            // Events published before uploadedBy was added lack it — fall back to the DB row
+            String uploadedBy = event.get("uploadedBy") != null
+                    ? event.get("uploadedBy").toString()
+                    : documentRepository.findById(documentId)
+                        .map(Document::getUploadedBy)
+                        .orElseThrow(() -> new IllegalStateException("No owner for document " + documentId));
 
             log.info("Received indexing event for document: {}", documentId);
 
@@ -39,7 +45,7 @@ public class DocumentIndexingConsumer {
             });
 
             // Index into ChromaDB
-            indexingService.indexDocument(documentId, content, filename);
+            indexingService.indexDocument(documentId, content, filename, uploadedBy);
 
             // Update status to INDEXED
             documentRepository.findById(documentId).ifPresent(doc -> {

@@ -9,6 +9,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
@@ -23,15 +24,17 @@ public class RagService {
     private final VectorStore vectorStore;
     private final ChatClient chatClient;
 
-    @Cacheable(value = "rag-queries", key = "#question.toLowerCase().trim()")
+    @Cacheable(value = "rag-queries", key = "#userEmail + ':' + #question.toLowerCase().trim()")
     @CircuitBreaker(name = "groqApi" , fallbackMethod = "queryFallback")
     @Retry(name = "groqApi")
-    public  RagResponse query(String question){
+    public  RagResponse query(String question, String userEmail){
 
+        // Only search chunks owned by the requesting user
         List<Document> relevantDocs = vectorStore.similaritySearch(
                 SearchRequest.builder()
                         .query(question)
                         .topK(5)
+                        .filterExpression(new FilterExpressionBuilder().eq("uploadedBy", userEmail).build())
                         .build()
         );
         if (relevantDocs == null) {
@@ -81,7 +84,7 @@ public class RagService {
     }
 
     // Fallback — called when circuit is OPEN or retries exhausted
-    public RagResponse queryFallback(String question, Exception e) {
+    public RagResponse queryFallback(String question, String userEmail, Exception e) {
         log.error("AI service unavailable for question: {}", question, e);
         return RagResponse.builder()
                 .answer("AI service is temporarily unavailable. Please try again in a moment.")

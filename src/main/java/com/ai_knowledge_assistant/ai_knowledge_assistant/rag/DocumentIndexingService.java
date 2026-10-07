@@ -17,12 +17,13 @@ public class DocumentIndexingService {
 
     private final VectorStore vectorStore;
 
-    public void indexDocument(Long documentId,String content,String fileName){
+    public void indexDocument(Long documentId,String content,String fileName,String uploadedBy){
         Document doc = new Document(
                 content,
                 Map.of(
                         "documentId",documentId.toString(),
-                        "filename",fileName
+                        "filename",fileName,
+                        "uploadedBy",uploadedBy
                 )
         );
 

@@ -24,7 +24,7 @@ public class QueryController {
             @RequestParam @NotBlank String question,
             @AuthenticationPrincipal UserDetails userDetails) {
 
-        RagResponse response = ragService.query(question);
+        RagResponse response = ragService.query(question, userDetails.getUsername());
         return ResponseEntity.ok(response);
     }
 

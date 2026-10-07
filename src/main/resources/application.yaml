@@ -1,4 +1,6 @@
 spring:
+  config:
+    import: optional:classpath:application-local.yaml
   application:
     name: ai-knowledge-backend
 
@@ -19,7 +21,7 @@ spring:
   ai:
     openai:
       base-url: https://api.groq.com/openai
-      api-key: " "
+      api-key: " "     # real value comes from application-local.yaml (gitignored)
       chat:
         options:
           model: llama-3.3-70b-versatile

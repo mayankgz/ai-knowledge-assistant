@@ -3,6 +3,8 @@ package com.ai_knowledge_assistant.ai_knowledge_assistant.document.service;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.document.entity.Document;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.document.model.DocumentResponse;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.document.repository.DocumentRepository;
+import com.ai_knowledge_assistant.ai_knowledge_assistant.exception.ForbiddenException;
+import com.ai_knowledge_assistant.ai_knowledge_assistant.exception.ResourceNotFoundException;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.kafka.DocumentIndexingProducer;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.rag.DocumentIndexingService;
 import lombok.RequiredArgsConstructor;
@@ -65,10 +67,10 @@ public class DocumentService {
     @CacheEvict(value = "rag-queries", allEntries = true)
     public void deleteDocument(Long id, String userEmail) {
         Document doc = documentRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Document not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
 
         if (!doc.getUploadedBy().equals(userEmail)) {
-            throw new RuntimeException("Not authorized to delete this document");
+            throw new ForbiddenException("Not authorized to delete this document");
         }
 
         // Remove chunks first: if this fails the row survives and the delete can be retried

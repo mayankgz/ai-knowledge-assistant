@@ -32,7 +32,9 @@ public class DocumentIndexingConsumer {
             // Status and progress updates happen inside, batch by batch
             indexingService.indexDocument(documentId);
 
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
+            // LinkageError (e.g. NoSuchMethodError from a parser library conflict) is an Error, not an
+            // Exception; left uncaught, Spring Kafka stops this listener for good and indexing halts
             log.error("Failed to process indexing event for document {}", documentId, e);
             if (documentId != null) {
                 markFailed(documentId, e);
@@ -41,7 +43,7 @@ public class DocumentIndexingConsumer {
 
     }
 
-    private void markFailed(Long documentId, Exception cause) {
+    private void markFailed(Long documentId, Throwable cause) {
         try {
             documentRepository.findById(documentId).ifPresent(doc -> {
                 doc.setStatus(Document.IndexingStatus.FAILED);

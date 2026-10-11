@@ -3,6 +3,10 @@ package com.ai_knowledge_assistant.ai_knowledge_assistant.rag;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.document.entity.Document.IndexingStatus;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.document.repository.DocumentRepository;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.storage.DocumentStorage;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -12,6 +16,7 @@ import org.springframework.ai.vectorstore.filter.Filter;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.NoSuchFileException;
 import java.util.ArrayList;
@@ -57,6 +62,23 @@ class DocumentIndexingServiceTest {
         when(storage.open(7L)).thenAnswer(inv -> new ByteArrayInputStream(text.getBytes(UTF_8)));
     }
 
+    // A real one-page PDF built with PDFBox, so extraction goes through Tika's actual PDF parser
+    private static byte[] pdfContaining(String text) throws IOException {
+        try (PDDocument pdf = new PDDocument(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            PDPage page = new PDPage();
+            pdf.addPage(page);
+            try (PDPageContentStream content = new PDPageContentStream(pdf, page)) {
+                content.beginText();
+                content.setFont(PDType1Font.HELVETICA, 12);
+                content.newLineAtOffset(72, 700);
+                content.showText(text);
+                content.endText();
+            }
+            pdf.save(out);
+            return out.toByteArray();
+        }
+    }
+
     private static String numberedLines(int count) {
         return IntStream.rangeClosed(1, count)
                 .mapToObj(i -> "Line " + i + " of the Zephyr logistics report.")
@@ -72,6 +94,19 @@ class DocumentIndexingServiceTest {
 
     private List<Document> allStoredChunks() {
         return batchesSentToVectorStore().stream().flatMap(List::stream).toList();
+    }
+
+    @Test
+    void extractsTextFromARealPdf() throws IOException {
+        // Guards the Tika/PDFBox pairing: a PDFBox 3 on the classpath broke every PDF with NoSuchMethodError
+        byte[] pdf = pdfContaining("Zephyr's internal codename is BLUE-HERON.");
+        when(storage.open(7L)).thenAnswer(inv -> new ByteArrayInputStream(pdf));
+
+        service(100, 1).indexDocument(7L);
+
+        String allText = allStoredChunks().stream().map(Document::getText).collect(Collectors.joining());
+        assertThat(allText).contains("BLUE-HERON");
+        assertThat(record.getStatus()).isEqualTo(IndexingStatus.INDEXED);
     }
 
     @Test

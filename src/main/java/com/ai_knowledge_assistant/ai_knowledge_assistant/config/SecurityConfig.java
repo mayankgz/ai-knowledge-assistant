@@ -2,6 +2,7 @@ package com.ai_knowledge_assistant.ai_knowledge_assistant.config;
 
 import com.ai_knowledge_assistant.ai_knowledge_assistant.auth.filter.JwtAuthFilter;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.auth.repository.UserRepository;
+import jakarta.servlet.DispatcherType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -33,7 +34,11 @@ public class SecurityConfig {
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         return http.csrf(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(auth ->
-                        auth.requestMatchers("/api/v1/auth/**").permitAll()
+                        // Streamed responses (Flux/SSE) finish in an ASYNC dispatch where JwtAuthFilter
+                        // doesn't run, so the request looks anonymous. The original REQUEST dispatch was
+                        // already authenticated and authorized, so the async completion is let through.
+                        auth.dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll()
+                                .requestMatchers("/api/v1/auth/**").permitAll()
                                 .requestMatchers("/actuator/health").permitAll()
                                 .anyRequest().authenticated()
                 ).sessionManagement(session ->

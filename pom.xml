@@ -138,12 +138,6 @@
             <version>7.4</version>
         </dependency>
 
-        <!-- ─── Spring AI — PDF reader ───────────────────── -->
-        <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-pdf-document-reader</artifactId>
-        </dependency>
-
         <!-- ─── Spring AI — Local Transformers (embeddings) ─ -->
 <!--        <dependency>-->
 <!--            <groupId>org.springframework.ai</groupId>-->

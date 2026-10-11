@@ -59,6 +59,19 @@ class DocumentIndexingConsumerTest {
     }
 
     @Test
+    void parserLinkageErrorMarksFailedInsteadOfKillingTheListener() throws Exception {
+        // A library version conflict surfaces as NoSuchMethodError, an Error rather than an Exception.
+        // If it escaped, Spring Kafka would stop the listener container and all indexing would halt.
+        doThrow(new NoSuchMethodError("PDDocument.load(InputStream, String, MemoryUsageSetting)"))
+                .when(indexingService).indexDocument(7L);
+
+        consumer.onDocumentUpload("{\"documentId\":7}");  // must not throw
+
+        assertThat(doc.getStatus()).isEqualTo(IndexingStatus.FAILED);
+        assertThat(doc.getErrorMessage()).contains("PDDocument.load");
+    }
+
+    @Test
     void unreadableMessageIsSwallowedWithoutTouchingTheDatabase() {
         consumer.onDocumentUpload("not json");
 

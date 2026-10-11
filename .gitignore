@@ -17,6 +17,9 @@ application-local.properties
 secrets/
 credentials/
 
+# Uploaded files (LocalDocumentStorage)
+data/
+
 # Logs
 *.log
 logs/

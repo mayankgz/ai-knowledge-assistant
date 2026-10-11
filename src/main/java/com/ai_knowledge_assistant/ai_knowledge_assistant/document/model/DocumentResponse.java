@@ -16,6 +16,9 @@ public class DocumentResponse {
     private String status;
     private LocalDateTime uploadedAt;
     private LocalDateTime indexedAt;
+    private Integer batchesDone;
+    private Integer batchesTotal;
+    private String errorMessage;
 
     public static DocumentResponse from(Document doc) {
         return DocumentResponse.builder()
@@ -26,6 +29,9 @@ public class DocumentResponse {
                 .status(doc.getStatus().name())
                 .uploadedAt(doc.getUploadedAt())
                 .indexedAt(doc.getIndexedAt())
+                .batchesDone(doc.getBatchesDone())
+                .batchesTotal(doc.getBatchesTotal())
+                .errorMessage(doc.getErrorMessage())
                 .build();
     }
 }

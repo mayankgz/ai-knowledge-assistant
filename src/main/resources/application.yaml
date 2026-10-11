@@ -70,6 +70,15 @@ jwt:
   secret: ""
   expiration: 86400000
 
+storage:
+  local:
+    path: ./data/uploads   # relative to where the app is started; gitignored
+
+indexing:
+  batch-size: 100           # chunks embedded and stored per batch
+  batch-max-attempts: 3     # tries per batch before the document is marked FAILED
+  retry-backoff-ms: 1000    # wait before retry n is n x this
+
 resilience4j:
   circuit-breaker:
     instances:

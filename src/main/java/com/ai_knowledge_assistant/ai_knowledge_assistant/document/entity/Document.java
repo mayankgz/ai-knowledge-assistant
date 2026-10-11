@@ -42,6 +42,13 @@ public class Document {
     @Column
     private LocalDateTime indexedAt;
 
+    // Indexing progress; nullable so existing rows survive the ddl-auto column add
+    @Column
+    private Integer batchesTotal;
+
+    @Column
+    private Integer batchesDone;
+
     @PrePersist
     protected void onCreate() {
         uploadedAt = LocalDateTime.now();

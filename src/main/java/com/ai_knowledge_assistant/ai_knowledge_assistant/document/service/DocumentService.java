@@ -7,14 +7,16 @@ import com.ai_knowledge_assistant.ai_knowledge_assistant.exception.ForbiddenExce
 import com.ai_knowledge_assistant.ai_knowledge_assistant.exception.ResourceNotFoundException;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.kafka.DocumentIndexingProducer;
 import com.ai_knowledge_assistant.ai_knowledge_assistant.rag.DocumentIndexingService;
+import com.ai_knowledge_assistant.ai_knowledge_assistant.storage.DocumentStorage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.tika.Tika;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.util.List;
 
 @Slf4j
@@ -25,36 +27,31 @@ public class DocumentService {
     private final DocumentIndexingProducer documentIndexingProducer;
     private final DocumentRepository documentRepository;
     private final DocumentIndexingService documentIndexingService;
-    private final Tika tika = new Tika();
+    private final DocumentStorage documentStorage;
 
+    // Only stores the file; text extraction happens later in the indexing consumer,
+    // so large or slow-to-parse files don't hold up the request
     public DocumentResponse upload(MultipartFile file , String emailID){
+        Document document = Document.builder()
+                .filename(file.getOriginalFilename())
+                .uploadedBy(emailID)
+                .fileSize(file.getSize())
+                .contentType(file.getContentType())
+                .build();
+        documentRepository.save(document);
 
-        try{
-            String content = tika.parseToString(file.getInputStream());
-            if(content == null || content.isBlank()){
-                throw new IllegalArgumentException("Could not extract content from the file");
-            }
-            Document document = Document.builder()
-                    .filename(file.getOriginalFilename())
-                    .uploadedBy(emailID)
-                    .fileSize(file.getSize())
-                    .contentType(file.getContentType())
-                    .build();
-            documentRepository.save(document);
-            log.info("Document saved: {} by {}", document.getId(), emailID);
-
-            documentIndexingProducer.sendDocumentEvent(
-                    document.getId()
-                    ,file.getOriginalFilename()
-                    ,content
-                    ,emailID
-            );
-            return  DocumentResponse.from(document);
-        }catch (Exception e) {
-            log.error("Failed to upload document: {}", file.getOriginalFilename(), e);
-            throw new RuntimeException("Failed to process document: " + e.getMessage());
+        try (InputStream in = file.getInputStream()) {
+            documentStorage.save(document.getId(), in);
+        } catch (IOException e) {
+            // Don't leave a row behind that can never be indexed
+            documentRepository.delete(document);
+            log.error("Failed to store document: {}", file.getOriginalFilename(), e);
+            throw new UncheckedIOException("Failed to store document", e);
         }
+        log.info("Document saved: {} by {}", document.getId(), emailID);
 
+        documentIndexingProducer.sendDocumentEvent(document.getId());
+        return  DocumentResponse.from(document);
     }
 
     public List<DocumentResponse> getDocuments(String userEmail) {
@@ -73,8 +70,13 @@ public class DocumentService {
             throw new ForbiddenException("Not authorized to delete this document");
         }
 
-        // Remove chunks first: if this fails the row survives and the delete can be retried
-        documentIndexingService.deleteDocument(id);
+        // Row goes last: if anything before it fails, the row survives and the delete can be retried
+        documentIndexingService.deleteChunks(id);
+        try {
+            documentStorage.delete(id);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to delete stored file for document " + id, e);
+        }
         documentRepository.delete(doc);
         log.info("Document deleted: {} by {}", id, userEmail);
     }

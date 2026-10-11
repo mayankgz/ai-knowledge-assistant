@@ -11,9 +11,10 @@ The project also includes an **experimental agentic layer** where an LLM planner
 ## 🚀 Highlights
 
 * 🔐 JWT-based authentication with BCrypt password hashing
-* 📄 Document upload and text extraction using Apache Tika
-* ⚡ Asynchronous document indexing using Apache Kafka
-* 🧩 Token-based document chunking
+* 👤 Per-user document isolation in retrieval, caching, and deletion
+* 📄 Document upload with raw files kept in pluggable storage (local disk now, S3-ready)
+* ⚡ Asynchronous document indexing using Apache Kafka, with ID-only messages
+* 🧩 Token-based chunking, embedded in retryable batches with progress tracking
 * 🔎 Semantic vector search using ChromaDB
 * 🤖 RAG-based question answering using Spring AI
 * 🧠 Groq-powered LLM integration
@@ -22,6 +23,7 @@ The project also includes an **experimental agentic layer** where an LLM planner
 * 🛡️ Resilience4j retry and circuit-breaker patterns
 * 📊 Spring Boot Actuator for health and metrics
 * 🧪 Experimental LLM-based agent/tool selection
+* ✅ Unit tests with JUnit 5 and Mockito that run without any infrastructure
 * 🐳 Docker Compose-based local infrastructure
 
 ---
@@ -37,16 +39,19 @@ flowchart TD
 
     B --> D[Document Service]
 
-    D --> E[Apache Tika]
     D --> F[(PostgreSQL)]
+    D --> T[(File Storage)]
     D --> G[Kafka Producer]
 
-    G --> H[Apache Kafka]
+    G -- documentId --> H[Apache Kafka]
 
     H --> I[Document Indexing Consumer]
 
-    I --> J[Token Text Splitter]
-    J --> K[Embedding Model]
+    I --> T
+    I --> E[Apache Tika]
+    E --> J[Token Text Splitter]
+    J --> U[Batches]
+    U --> K[Embedding Model]
     K --> L[(ChromaDB)]
 
     B --> M[RAG Service]
@@ -105,28 +110,29 @@ Authenticated users can upload documents through the document API.
 The backend:
 
 1. Receives the uploaded document.
-2. Extracts text using **Apache Tika**.
-3. Stores document metadata in PostgreSQL.
-4. Creates a `PENDING` indexing state.
-5. Publishes an indexing event to Kafka.
+2. Stores document metadata in PostgreSQL with a `PENDING` indexing state.
+3. Saves the raw file to document storage.
+4. Publishes an indexing event to Kafka containing only the document ID.
 
-This separates document upload from the potentially expensive indexing process.
+No parsing happens during the request, so large or slow-to-parse files don't hold up the upload. If the file can't be stored, the metadata row is removed again rather than left behind.
 
 ```text
 Document Upload
        |
        v
- Apache Tika
+ PostgreSQL (PENDING)
        |
        v
- PostgreSQL
+ Document Storage  (data/uploads/{id})
        |
        v
- Kafka Producer
+ Kafka Producer  {"documentId": 42}
        |
        v
  document-indexing topic
 ```
+
+Storage sits behind a `DocumentStorage` interface. The current implementation writes to local disk; an object-storage implementation such as S3 can replace it without changing the upload or indexing code.
 
 ---
 
@@ -137,20 +143,32 @@ Kafka is used to decouple document ingestion from vector indexing.
 The indexing consumer processes documents asynchronously.
 
 ```text
-Kafka Consumer
+Kafka Consumer  {"documentId": 42}
       |
       v
-Text Extraction
+Load file from Document Storage
       |
       v
-TokenTextSplitter
+Text Extraction (Apache Tika, no length limit)
       |
       v
-Embedding Model
+TokenTextSplitter (~500-token chunks, no chunk cap)
       |
       v
-ChromaDB
+Batches of 100 chunks
+      |
+      v
+Embedding Model (Ollama) --> ChromaDB      (per batch, with retries)
 ```
+
+Key properties of the pipeline:
+
+* **Whole documents are indexed.** Tika's default 100,000-character limit and the splitter's chunk cap are both removed, so long documents are no longer cut short.
+* **Batches with progress.** Chunks are embedded and stored in batches (`indexing.batch-size`), and the document records `batchesDone` / `batchesTotal`, visible in the document list.
+* **Per-batch retries.** A failing batch is retried (`indexing.batch-max-attempts`, with backoff) without redoing earlier batches.
+* **Deterministic chunk IDs.** Each chunk is stored as `{documentId}:{chunkIndex}`. ChromaDB upserts by ID, so a retried batch overwrites its chunks instead of duplicating them.
+* **Failure reasons.** A document that fails indexing is marked `FAILED` with an `errorMessage` such as `Batch 2/10 failed after 3 attempts: ...`.
+* **Deletes during indexing are safe.** If a document is deleted while being indexed, the consumer removes any chunks it stored in the meantime and stops.
 
 The document indexing lifecycle is represented by:
 
@@ -182,6 +200,10 @@ Document processing can involve:
 * Vector database operations
 
 Moving this work to an asynchronous consumer prevents these operations from being tightly coupled to the document upload request.
+
+### Why only the document ID goes through Kafka
+
+Kafka is designed for small messages and rejects messages over about 1 MB by default, while uploads can be up to 10 MB. Instead of putting document text in the message, the file is kept in storage and the message carries only its ID (the *claim-check* pattern). Messages stay a few bytes regardless of document size, and the same message shape works when the trigger later becomes an object-storage event.
 
 ---
 
@@ -216,6 +238,10 @@ Sources
 
 The application retrieves the five most relevant document chunks from ChromaDB.
 
+The search is **filtered to the requesting user's own documents**: every chunk carries an `uploadedBy` metadata field, and the similarity search only considers chunks where it matches the authenticated user. One user's documents never feed another user's answers.
+
+If no matching chunks are found, the API returns a message asking the user to upload documents, without calling the LLM.
+
 These chunks are combined into a context that is supplied to the language model.
 
 The system prompt instructs the model to:
@@ -240,7 +266,9 @@ The query is normalized using:
 question.toLowerCase().trim()
 ```
 
-The normalized question is used as the cache key.
+The cache key combines the user's email with the normalized question (`email:question`), so cached answers are never shared between users.
+
+Answers without sources (no matching documents, or the fallback reply when the LLM is unavailable) are not cached, so they don't persist after a user uploads a document or the LLM recovers. Cached entries expire after 30 minutes, and deleting a document clears the cache.
 
 ```text
 User Question
@@ -296,6 +324,8 @@ The circuit breaker can temporarily prevent additional calls when the failure th
 
 If retries are exhausted or the circuit is open, the application returns a controlled fallback response instead of allowing the external failure to propagate uncontrolled through the application.
 
+Document indexing has its own resilience: each batch of chunks is retried independently with backoff, and a document that still fails is marked `FAILED` with the reason recorded.
+
 ---
 
 # 🤖 7. Experimental Agentic Layer
@@ -349,7 +379,7 @@ flowchart TD
     C --> I[Final Answer]
 ```
 
-> **Note:** The agent/tool layer is experimental. Some tool implementations are placeholders intended for future extension.
+> **Note:** The agent/tool layer is experimental. The tool implementations are currently placeholders that return fixed data, and they are not yet scoped to the requesting user.
 
 ---
 
@@ -386,7 +416,13 @@ Authorization Header
 Protected API
 ```
 
-Secrets and API credentials should be supplied through environment variables rather than committed to the repository.
+### Document ownership
+
+* Every document and every stored chunk is tagged with the uploader's email.
+* Vector search, cached answers, and the document list are all scoped to the authenticated user.
+* Deleting another user's document returns `403 Forbidden`; deleting a non-existent document returns `404 Not Found`.
+
+Secrets and API credentials are kept in a gitignored local configuration file or environment variables rather than committed to the repository (see [Configure Secrets](#3-configure-secrets)).
 
 ---
 
@@ -398,6 +434,7 @@ Secrets and API credentials should be supplied through environment variables rat
 | Authentication      | Spring Security + JWT |
 | Password Hashing    | BCrypt                |
 | Document Processing | Apache Tika           |
+| File Storage        | Local disk (S3-ready) |
 | Async Processing    | Apache Kafka          |
 | Text Chunking       | TokenTextSplitter     |
 | Vector Database     | ChromaDB              |
@@ -407,6 +444,7 @@ Secrets and API credentials should be supplied through environment variables rat
 | Caching             | Redis                 |
 | Resilience          | Resilience4j          |
 | Monitoring          | Spring Boot Actuator  |
+| Testing             | JUnit 5 + Mockito     |
 | Build               | Maven                 |
 | Infrastructure      | Docker Compose        |
 
@@ -427,9 +465,8 @@ Secrets and API credentials should be supplied through environment variables rat
 ## AI / RAG
 
 * Spring AI
-* Groq
-* Llama-based LLM
-* Ollama
+* Groq (`openai/gpt-oss-120b`)
+* Ollama (`nomic-embed-text` embeddings)
 * ChromaDB
 * Vector similarity search
 * TokenTextSplitter
@@ -458,6 +495,12 @@ Secrets and API credentials should be supplied through environment variables rat
 * Logback
 * Logstash Encoder
 
+## Testing
+
+* JUnit 5
+* Mockito
+* AssertJ
+
 ## Build & Infrastructure
 
 * Maven
@@ -477,6 +520,7 @@ ai-knowledge-assistant/
 │   └── ai-knowledge-assistant/
 │       │
 │       ├── pom.xml
+│       ├── data/uploads/   (gitignored, uploaded files)
 │       │
 │       └── src/
 │           ├── main/
@@ -484,7 +528,8 @@ ai-knowledge-assistant/
 │           │   │   └── com/ai_knowledge_assistant/
 │           │   │
 │           │   └── resources/
-│           │       └── application.yaml
+│           │       ├── application.yaml
+│           │       └── application-local.yaml   (gitignored, your secrets)
 │           │
 │           └── test/
 │
@@ -499,6 +544,7 @@ The backend is organized around functional areas:
 ```text
 auth/
 document/
+storage/
 kafka/
 rag/
 agent/
@@ -522,7 +568,13 @@ Install the following:
 * Docker Compose
 * Ollama
 
-You will also need credentials for the configured LLM provider.
+You will also need a Groq API key.
+
+Pull the embedding model once:
+
+```bash
+ollama pull nomic-embed-text
+```
 
 ---
 
@@ -554,29 +606,30 @@ This starts:
 
 ---
 
-## 3. Configure Environment Variables
+## 3. Configure Secrets
 
 Do **not** commit API keys, passwords, JWT secrets, or other credentials to GitHub.
 
-Configure the required values through environment variables or a local configuration file.
-
-Example:
+`application.yaml` keeps blank placeholders and automatically imports an optional, gitignored `application-local.yaml`. Create it at `backend/ai-knowledge-assistant/src/main/resources/application-local.yaml`:
 
 ```yaml
 spring:
   ai:
     openai:
-      api-key: ${GROQ_API_KEY}
+      api-key: <your-groq-api-key>
 
 jwt:
-  secret: ${JWT_SECRET}
+  secret: <base64-secret>
 ```
 
-Example environment variables:
+* `jwt` is a top-level key, not nested under `spring`.
+* The JWT secret is Base64-decoded and used for HS256, so it must be at least 256 bits. Generate one with `openssl rand -base64 64`.
+
+Alternatively, any property can be supplied as an environment variable, for example:
 
 ```bash
-GROQ_API_KEY=<your-api-key>
-JWT_SECRET=<your-jwt-secret>
+SPRING_AI_OPENAI_API_KEY=<your-groq-api-key>
+JWT_SECRET=<base64-secret>
 ```
 
 ---
@@ -599,6 +652,29 @@ On Windows:
 
 ```bash
 mvnw.cmd spring-boot:run
+```
+
+---
+
+## 5. Run the Tests
+
+Unit tests use mocks and need no Docker, Ollama, or API keys:
+
+```bash
+./mvnw test
+```
+
+Run a single test class or method:
+
+```bash
+./mvnw test -Dtest=RagServiceTest
+./mvnw test -Dtest=RagServiceTest#searchIsFilteredToTheRequestingUser
+```
+
+The full-application context test is skipped by default because it needs all infrastructure running:
+
+```bash
+INTEGRATION_TESTS=true ./mvnw test
 ```
 
 ---
@@ -637,10 +713,25 @@ Multipart parameter:
 file
 ```
 
+Returns `201 Created` with the document in `PENDING` state. Indexing happens in the background.
+
 ### List Documents
 
 ```http
 GET /api/v1/documents
+```
+
+Returns the authenticated user's documents, including indexing progress:
+
+```json
+{
+  "id": 42,
+  "filename": "report.pdf",
+  "status": "INDEXING",
+  "batchesDone": 4,
+  "batchesTotal": 10,
+  "errorMessage": null
+}
 ```
 
 ### Delete Document
@@ -648,6 +739,8 @@ GET /api/v1/documents
 ```http
 DELETE /api/v1/documents/{id}
 ```
+
+Removes the document's chunks from ChromaDB, its stored file, and its database record. Returns `204`, `403` for another user's document, or `404` if it doesn't exist.
 
 ---
 
@@ -664,6 +757,8 @@ Parameter:
 ```text
 question
 ```
+
+Answers are drawn only from the authenticated user's own documents.
 
 Example:
 
@@ -717,6 +812,14 @@ Kafka allows this processing to happen asynchronously instead of blocking the do
 
 ---
 
+## Why store files and batch the indexing?
+
+Passing document text through Kafka limits document size to Kafka's message limit and couples the queue to the payload. Storing the file and sending only its ID keeps messages tiny and mirrors how object-storage pipelines work (an upload to S3 triggering an event that carries the object key).
+
+Splitting chunks into batches makes indexing large documents robust: a failure costs one batch instead of the whole document, progress is visible, and the same batch unit can later be fanned out to parallel workers. Deterministic chunk IDs make retries safe.
+
+---
+
 ## Why ChromaDB?
 
 The application needs semantic retrieval over document chunks.
@@ -758,6 +861,9 @@ This project was designed to explore practical backend engineering concepts beyo
 * Asynchronous processing
 * Event-driven architecture
 * Kafka producers and consumers
+* Claim-check pattern (ID-only messages, payload in storage)
+* Batch processing with per-batch retries and progress tracking
+* Idempotent writes through deterministic IDs
 * External service failure handling
 
 ### Backend Architecture
@@ -765,7 +871,9 @@ This project was designed to explore practical backend engineering concepts beyo
 * Layered Spring Boot architecture
 * Feature-based package organization
 * Service/repository separation
-* Centralized exception handling
+* Storage abstraction behind an interface
+* Centralized exception handling with typed 403/404 responses
+* Unit testing with mocks
 
 ### AI Engineering
 
@@ -794,6 +902,7 @@ This project was designed to explore practical backend engineering concepts beyo
 * JWT authentication
 * BCrypt password hashing
 * Stateless Spring Security
+* Per-user data isolation in a shared vector store
 
 ---
 
@@ -803,12 +912,13 @@ This is a **learning and portfolio project rather than a production deployment**
 
 Current areas for improvement include:
 
-* More comprehensive automated tests
-* Stronger document ownership checks during vector retrieval
-* More robust Kafka failure and retry handling
-* Improved vector-store document deletion
+* Kafka-level retry and dead-letter handling (failed documents are marked `FAILED` with a reason, but are not automatically retried)
+* A re-index endpoint for previously uploaded documents
+* Per-user cache invalidation (deleting a document currently clears all cached answers, and new uploads don't refresh cached answers until they expire)
+* Local-disk file storage assumes a single application instance
+* Integration tests against real infrastructure (current tests are unit tests with mocks)
 * External secret management for production deployments
-* Persistent agent/tool implementations
+* Real agent/tool implementations scoped to the requesting user
 * More complete analytics functionality
 * OpenAPI/Swagger documentation
 * Improved observability and distributed tracing
@@ -821,6 +931,11 @@ Current areas for improvement include:
 
 Planned improvements include:
 
+* [x] Per-user document isolation in retrieval, caching, and deletion
+* [x] Full-length document indexing with batched, retryable embedding
+* [x] Unit test suite for the core services
+* [ ] S3 storage with presigned and multipart uploads
+* [ ] Parallel embedding workers (one queue message per batch)
 * [ ] Streaming LLM responses
 * [ ] Conversation/session memory
 * [ ] Richer document metadata filtering
@@ -833,7 +948,6 @@ Planned improvements include:
 * [ ] CI/CD pipeline
 * [ ] OpenTelemetry-based distributed tracing
 * [ ] Improved Kafka retry and dead-letter handling
-* [ ] More robust document-level authorization
 
 ---
 
